@@ -10,13 +10,17 @@ import requests
 import os
 from datetime import datetime
 
+import time
+
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.3-70b-versatile"
 MAX_TOKENS = 2000
+RETRY_WAIT = 15  # seconds to wait on rate limit
 
 
 def _call_llm(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
-    """Core API caller — connects to Groq for ultra-fast Llama 3 inference."""
+    """Core API caller — connects to Groq for ultra-fast Llama 3 inference.
+    Includes automatic retry with backoff for free-tier rate limits."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY environment variable is not set")
@@ -34,9 +38,19 @@ def _call_llm(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
             {"role": "user", "content": user}
         ]
     }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+    
+    for attempt in range(3):
+        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code == 429:
+            # Rate limited — wait and retry
+            time.sleep(RETRY_WAIT)
+            continue
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    
+    # If all retries exhausted, raise the last error
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    return ""
 
 
 def _parse_json(raw: str) -> dict:
