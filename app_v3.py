@@ -37,14 +37,32 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stApp { background: #0A0A0C; color: #DEDBD5; }
 #MainMenu, footer { visibility: hidden; }
-[data-testid="stToolbar"] { visibility: hidden; }
-[data-testid="stSidebar"][aria-expanded="false"] { display: block; min-width: 260px; margin-left: 0; }
-[data-testid="collapsedControl"] { display: flex !important; visibility: visible !important; }
+[data-testid="stToolbar"] { visibility: hidden; height: 0; }
+[data-testid="stHeader"] { height: 0; }
+[data-testid="collapsedControl"] { display: none !important; }
 .block-container { padding: 2rem 2.5rem 4rem; max-width: 1200px; }
 
-/* sidebar */
-[data-testid="stSidebar"] { background: #0F0F13; border-right: 1px solid #1A1A22; }
-[data-testid="stSidebar"] .block-container { padding: 1.5rem 1rem; }
+/* sidebar — always visible, distinct background */
+[data-testid="stSidebar"] {
+    background: #141422 !important;
+    border-right: 1px solid #2A2A3A;
+    min-width: 280px !important;
+    width: 280px !important;
+    transform: none !important;
+    position: relative !important;
+    z-index: 999;
+}
+[data-testid="stSidebar"][aria-expanded="false"] {
+    min-width: 280px !important;
+    width: 280px !important;
+    transform: none !important;
+    display: block !important;
+    margin-left: 0 !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+    padding: 1.5rem 1rem;
+    background: #141422 !important;
+}
 
 /* inputs */
 textarea, .stTextArea textarea, input[type="text"], .stTextInput input {
