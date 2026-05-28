@@ -3,10 +3,7 @@ import json
 import os
 import sys
 import requests
-import smtplib
 from datetime import datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
 # Make utils importable
@@ -219,7 +216,7 @@ with st.sidebar:
     st.markdown("<div style='font-size:11px;font-weight:600;letter-spacing:.12em;color:#6C63FF;text-transform:uppercase;margin-bottom:4px'>Manager Console</div>", unsafe_allow_html=True)
     st.markdown("<div style='font-size:20px;font-weight:600;color:#DEDBD5;margin-bottom:20px'>Meeting Intelligence</div>", unsafe_allow_html=True)
 
-    api_key = st.text_input("Anthropic API Key", value=os.getenv("ANTHROPIC_API_KEY", ""), type="password", placeholder="sk-ant-...")
+    api_key = st.text_input("Groq API Key", value=os.getenv("GROQ_API_KEY", ""), type="password", placeholder="gsk_...")
     slack_webhook = st.text_input("Slack Webhook", value=os.getenv("SLACK_WEBHOOK_URL", ""), placeholder="https://hooks.slack.com/...")
 
     st.markdown("---")
@@ -415,11 +412,11 @@ with tab_analyse:
     if not can_run and not transcript:
         st.markdown("<div style='text-align:center;font-size:12px;color:#333;margin-top:8px'>Add a transcript above to analyse</div>", unsafe_allow_html=True)
     if not api_key:
-        st.markdown("<div style='text-align:center;font-size:12px;color:#F87171;margin-top:8px'>Add your Anthropic API key in the sidebar</div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center;font-size:12px;color:#F87171;margin-top:8px'>Add your Groq API key in the sidebar</div>", unsafe_allow_html=True)
 
     # Run analysis
     if run:
-        with st.spinner("Analysing with Claude..."):
+        with st.spinner("Analysing with Llama 3 via Groq..."):
             try:
                 result = analyse_meeting(transcript, members, api_key)
                 meeting_id = save_meeting_result(gid, group["name"], transcript, result, source_label)
@@ -748,4 +745,4 @@ with tab_history:
                 with col_btn:
                     if st.button("View", key=f"view_{mtg['id']}"):
                         st.session_state[f"selected_meeting_{gid}"] = mtg["id"]
-                        st.rerun()
+                        st.rerun()

@@ -1,0 +1,7 @@
+__pycache__/
+utils/__pycache__/
+*.pyc
+data/
+*.db
+meetings.db
+.env
