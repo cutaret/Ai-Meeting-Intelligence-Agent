@@ -1,0 +1,89 @@
+Meeting: AI Architecture & Infrastructure Sync
+Date: May 28, 2026
+Attendees: Kartik, Aryan, Riya
+
+Kartik: Alright, let's get started. Thanks for jumping on, both of you. The main agenda today is finalizing the architecture for the new recommendation engine rollout, and making sure our cloud infrastructure is ready for the increased load. Aryan, do we have an update on the AWS provisioning?
+
+Aryan: Yeah, so I looked into our current EC2 limits and we're definitely going to need an increase if we want to run the new Llama 3 models locally. I've submitted a quota increase request to AWS support, but they said it could take up to 48 hours. I'll monitor that and let you know as soon as it's approved. I should have the new auto-scaling groups configured by Thursday end of day, assuming the quota gets bumped.
+
+Kartik: Okay, Thursday is cutting it a bit close but we can work with it. Let's make sure the deployment scripts are fully ready before then so we can just hit the button once the instances are up. Did you test the Terraform scripts in the dev environment?
+
+Aryan: I did, but there was a weird issue with the IAM roles not propagating fast enough before the instances spun up. I had to add a sleep timer in the script. It's a bit of a hack.
+
+Riya: Oh, I've seen that before with AWS. Instead of a sleep timer, can you use a Terraform `depends_on` block with a null resource that just polls the AWS API until the role is active?
+
+Aryan: That's a good idea actually. That would be way more robust than a hardcoded 30-second sleep. Riya, do you have a snippet for that? 
+
+Riya: Yeah, I used it on the payment gateway project last year. I can slack you the code snippet right after this call.
+
+Aryan: Perfect, thanks. I'll update the Terraform script with that polling logic by tomorrow.
+
+Kartik: Excellent. Now Riya, how is the frontend integration looking for the new recommendation widget?
+
+Riya: The UI components are done. I've built the new dashboard layout and it looks great on desktop and mobile. I spent a lot of time getting the CSS grid responsive for the new card layouts. But I'm currently blocked on the API side. The staging endpoint you gave me yesterday is returning a 500 error every time I try to fetch user-specific recommendations.
+
+Kartik: Ah, right. That's my bad. I pushed a change late last night that broke the auth middleware on staging. I was trying to optimize the token validation but it looks like it's failing on the decoding step. I'll fix that right after this call and deploy a patch. You should be unblocked by noon today.
+
+Riya: Awesome, thanks Kartik. Once the API is fixed, I'll need about two days to wire everything up and write the Cypress tests. So I can have the frontend completely finished by Wednesday evening. 
+
+Kartik: Do we need any specific event tracking on the frontend for these new recommendations? Like, tracking when a user clicks a specific recommendation vs ignoring it?
+
+Riya: Oh, definitely. Product management is going to want those metrics. I haven't added the Mixpanel events yet. Do we have a tracking plan document for this feature?
+
+Kartik: I don't think we do. Let me ping Sarah from Product today and get her to write up the tracking plan. I'll get that to you by tomorrow so you can implement the events while you're wiring up the API.
+
+Riya: Sounds good. That shouldn't take more than a few hours once I have the spec.
+
+Aryan: Quick question on the API - what's the expected latency? Because if we're hitting the database for every single recommendation request, the database is going to melt down. We're expecting 10x our normal traffic during the launch. We really need a caching layer.
+
+Kartik: Good point. We discussed using Redis for this, but no one actually implemented it yet. The query is pretty heavy, it joins across three tables.
+
+Aryan: I can take that on. I'll deploy a Redis cluster via ElastiCache. It shouldn't take long. But Riya, you'll need to update the backend Node app to check the cache before querying the database. Is that something you can handle?
+
+Riya: Yeah, no problem. If you get the Redis endpoint to me by tomorrow, I can add the caching logic to the backend Node service. I'll just need to make sure we set the TTL correctly so we aren't serving stale recommendations.
+
+Kartik: Let's go with a 15-minute TTL for now. We can adjust it later based on metrics. Actually, wait. What if the user updates their preferences? We need to invalidate the cache immediately for that user.
+
+Riya: Oh, right. Good catch. So I'll need to add cache invalidation logic to the user profile update endpoint as well. I'll write a ticket for that so I don't forget.
+
+Aryan: I'll have the Redis cluster up and the connection string sent to you by tomorrow morning, Riya. I'm going to configure it with a multi-AZ setup just to be safe. 
+
+Kartik: Perfect. Hey Aryan, while we're talking about infrastructure... are we going to need to increase our logging retention for this launch?
+
+Aryan: Currently Datadog is retaining logs for 7 days. If we want to do deep analysis on the launch week, we probably want 15 or 30 days. But that's going to cost a lot more.
+
+Kartik: Let's bump it to 15 days just for the next month. I'll get approval from finance for the budget increase. Aryan, can you change the Datadog retention policy once I get the thumbs up? 
+
+Aryan: Yeah, I can do that. Just let me know when it's approved. 
+
+Kartik: Will do. I'll send the email to finance right after this. 
+
+Riya: By the way, are we doing a staggered rollout or a big bang launch? Because if it's a big bang, I'm a little worried about the initial spike.
+
+Kartik: The plan right now is 10% of users on Friday, and then ramping up to 100% on Monday. I need to configure the feature flags in LaunchDarkly for that. I'll set up the rollout rules on Thursday so it's ready for Friday morning.
+
+Riya: Okay, that makes me feel a lot better. A 10% canary rollout is much safer. 
+
+Kartik: Great. So just to recap everything: I will fix the staging API auth bug by noon today so Riya is unblocked. I will also get the tracking plan from Sarah and configure the LaunchDarkly feature flags by Thursday. Oh, and I'll email finance about the Datadog budget today.
+
+Aryan: I'm handling the AWS quota increase and will have the auto-scaling groups ready by Thursday. I'll also deploy a Redis cluster by tomorrow morning, and I'll update the Terraform script with the polling logic that Riya is going to send me. And I'll update Datadog retention once Kartik gets budget approval.
+
+Kartik: And Riya?
+
+Riya: I will send Aryan the Terraform snippet today. I will handle the frontend integration by Wednesday evening, including the Mixpanel tracking once I get the spec. I'll also add the Redis caching and invalidation logic to the Node backend once Aryan gives me the endpoint.
+
+Kartik: Fantastic. Do we need to schedule a load testing session before the Friday launch?
+
+Aryan: Yes, absolutely. If we don't load test, we're flying blind. Let's aim for Thursday afternoon, assuming my auto-scaling groups are ready. We need to simulate at least 5x normal traffic.
+
+Kartik: Agreed. Let's put a pin in it for Thursday at 3 PM. I'll send out a calendar invite for the load testing session. If anything slips, we'll push the load test to Friday morning, but let's try to hit Thursday. 
+
+Riya: I'll make sure the Cypress end-to-end tests are part of the CI pipeline before the load test, just to ensure we don't regress anything during the tuning.
+
+Kartik: Good call. Alright, anything else? 
+
+Aryan: Nope, I'm good. I have a hard stop in a minute anyway.
+
+Riya: Nothing from me. 
+
+Kartik: Thanks everyone. Let's get to work. I'll talk to you all tomorrow at the standup.

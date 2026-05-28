@@ -528,16 +528,20 @@ with tab_analyse:
                 p = t.get("priority", "Medium")
                 pc = PRIORITY_COLORS.get(p, "#999")
                 role = t.get("role", "")
-                st.markdown(f"""
+                role_chip = f"<span class='t-chip' style='background:#1A1A28;color:#555'>{role}</span>" if role and role != "Unknown" else ""
+                html_str = f"""
                 <div class='t-row'>
                   <div class='t-row-title'>{t['description']}</div>
                   <div class='t-chips'>
                     <span class='t-chip' style='background:#1A1A28;color:#888'>👤 {t.get('owner','Unassigned')}</span>
-                    {"<span class='t-chip' style='background:#1A1A28;color:#555'>" + role + "</span>" if role and role != "Unknown" else ""}
+                    {role_chip}
                     <span class='t-chip' style='background:#1A1A28;color:#777'>📅 {t.get('deadline','Not set')}</span>
                     <span class='t-chip' style='background:#1A1A28;color:{pc}'>● {p}</span>
                   </div>
-                </div>""", unsafe_allow_html=True)
+                </div>"""
+                # Remove empty lines to prevent markdown code block rendering
+                html_str = "\n".join(line for line in html_str.splitlines() if line.strip())
+                st.markdown(html_str, unsafe_allow_html=True)
 
         # Member activity
         if member_activity:
@@ -732,7 +736,7 @@ with tab_history:
                 for t in htasks:
                     p = t.get("priority","Medium")
                     pc = PRIORITY_COLORS.get(p,"#999")
-                    st.markdown(f"""
+                    html_str = f"""
                     <div class='t-row'>
                       <div class='t-row-title'>{t['description']}</div>
                       <div class='t-chips'>
@@ -740,7 +744,9 @@ with tab_history:
                         <span class='t-chip' style='background:#1A1A28;color:#777'>📅 {t.get('deadline','Not set')}</span>
                         <span class='t-chip' style='background:#1A1A28;color:{pc}'>● {p}</span>
                       </div>
-                    </div>""", unsafe_allow_html=True)
+                    </div>"""
+                    html_str = "\n".join(line for line in html_str.splitlines() if line.strip())
+                    st.markdown(html_str, unsafe_allow_html=True)
 
                 st.download_button("⬇️ Export this meeting JSON", data=json.dumps(r, indent=2), file_name=f"{selected_id}.json", mime="application/json")
 
