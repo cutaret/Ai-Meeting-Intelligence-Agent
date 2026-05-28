@@ -36,7 +36,10 @@ st.markdown("""
 
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stApp { background: #0A0A0C; color: #DEDBD5; }
-#MainMenu, footer, header { visibility: hidden; }
+#MainMenu, footer { visibility: hidden; }
+[data-testid="stToolbar"] { visibility: hidden; }
+[data-testid="stSidebar"][aria-expanded="false"] { display: block; min-width: 260px; margin-left: 0; }
+[data-testid="collapsedControl"] { display: flex !important; visibility: visible !important; }
 .block-container { padding: 2rem 2.5rem 4rem; max-width: 1200px; }
 
 /* sidebar */
@@ -745,4 +748,4 @@ with tab_history:
                 with col_btn:
                     if st.button("View", key=f"view_{mtg['id']}"):
                         st.session_state[f"selected_meeting_{gid}"] = mtg["id"]
-                        st.rerun()
+                        st.rerun()
