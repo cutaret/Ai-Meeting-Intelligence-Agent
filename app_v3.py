@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(__file__))
 from utils.storage import (
     load_groups, save_groups, create_group, update_group_members,
-    delete_group, save_meeting_result, get_meetings_for_group, get_meeting_by_id
+    delete_group, save_meeting_result, get_meetings_for_group, get_meeting_by_id,
+    delete_meeting
 )
 from utils.teams_parser import detect_and_parse
 from utils.agents import analyse_meeting
@@ -748,7 +749,18 @@ with tab_history:
                     html_str = "\n".join(line for line in html_str.splitlines() if line.strip())
                     st.markdown(html_str, unsafe_allow_html=True)
 
-                st.download_button("⬇️ Export this meeting JSON", data=json.dumps(r, indent=2), file_name=f"{selected_id}.json", mime="application/json")
+                col_export, col_del, col_back = st.columns([2, 1, 1])
+                with col_export:
+                    st.download_button("⬇️ Export JSON", data=json.dumps(r, indent=2), file_name=f"{selected_id}.json", mime="application/json")
+                with col_del:
+                    if st.button("🗑️ Delete", key=f"del_detail_{selected_id}"):
+                        delete_meeting(selected_id)
+                        st.session_state[f"selected_meeting_{gid}"] = None
+                        st.rerun()
+                with col_back:
+                    if st.button("⬅️ Back", key=f"back_{selected_id}"):
+                        st.session_state[f"selected_meeting_{gid}"] = None
+                        st.rerun()
 
         else:
             # Meeting list
@@ -762,7 +774,7 @@ with tab_history:
                 ntasks = len(r.get("tasks",[]))
                 nrisks = len(r.get("risks",[]))
 
-                col_main, col_btn = st.columns([6,1])
+                col_main, col_btn, col_del = st.columns([5, 1, 1])
                 with col_main:
                     st.markdown(f"""
                     <div class='hist-row'>
@@ -772,4 +784,8 @@ with tab_history:
                 with col_btn:
                     if st.button("View", key=f"view_{mtg['id']}"):
                         st.session_state[f"selected_meeting_{gid}"] = mtg["id"]
+                        st.rerun()
+                with col_del:
+                    if st.button("🗑️ Delete", key=f"del_list_{mtg['id']}"):
+                        delete_meeting(mtg["id"])
                         st.rerun()

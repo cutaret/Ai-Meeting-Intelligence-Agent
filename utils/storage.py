@@ -156,3 +156,13 @@ def get_meeting_by_id(meeting_id: str) -> Optional[dict]:
         except Exception:
             pass
     return None
+
+def delete_meeting(meeting_id: str):
+    """Delete a specific meeting file."""
+    _ensure_dirs()
+    fpath = os.path.join(MEETINGS_DIR, f"{meeting_id}.json")
+    if os.path.exists(fpath):
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
