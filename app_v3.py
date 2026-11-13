@@ -14,7 +14,10 @@ from utils.storage import (
     delete_meeting
 )
 from utils.teams_parser import detect_and_parse
-from utils.agents import analyse_meeting
+try:
+    from utils.agents import analyse_meeting
+except ImportError:
+    from agents import analyse_meeting
 
 load_dotenv()
 
@@ -176,17 +179,19 @@ textarea:focus, input:focus { border-color: #6C63FF !important; box-shadow: 0 0 
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# CONSTANTS
+# CONSTANTS & DEMO SEED DATA
 # ─────────────────────────────────────────────
 PRIORITY_COLORS = {"High": "#F87171", "Medium": "#FBBF24", "Low": "#4ADE80"}
 RISK_ICONS = {
-    "missing_owner":    "👤 No owner",
-    "missing_deadline": "📅 No deadline",
-    "overloaded_person":"⚠️ Overloaded",
-    "blocker":          "🚫 Blocker",
-    "role_mismatch":    "🔀 Role mismatch",
+    "missing_owner":      "👤 No owner",
+    "missing_deadline":   "📅 No deadline",
+    "overloaded_person":  "⚠️ Overloaded",
+    "blocker":            "🚫 Blocker",
+    "dependency_conflict":"🔗 Dependency",
+    "scope_creep":        "📈 Scope creep",
+    "role_mismatch":      "🔀 Role mismatch",
 }
-AV_COLORS = ["av0","av1","av2","av3","av4","av5","av6","av7"]
+AV_COLORS = ["av0", "av1", "av2", "av3", "av4", "av5", "av6", "av7"]
 
 SAMPLE_TRANSCRIPT = """Meeting: AI Team Sprint Planning
 Date: May 26, 2026
@@ -226,10 +231,105 @@ Raghav: Just the dataset — that's my main blocker.
 
 Priya: Noted. I'll handle it. Let's wrap up."""
 
+DEMO_MEMBERS = [
+    {"name": "Neha", "role": "SDE", "notes": "Backend & API integration lead"},
+    {"name": "Raghav", "role": "Data Scientist", "notes": "Recommendation engine & ML pipelines"},
+    {"name": "Amar", "role": "HR", "notes": "Onboarding & team operations"},
+    {"name": "Priya", "role": "Product Manager", "notes": "Sprint planning & cross-team unblocking"},
+]
+
+DEMO_INITIAL_RESULT = {
+    "meeting_title": "AI Team Sprint Planning — Recommendation MVP",
+    "summary": (
+        "The team committed to launching the recommendation engine MVP by May 31st. "
+        "Neha is wrapping up unit tests for the model API integration by Wednesday and will also review Raghav's pipeline code and send Amar the intern setup guide. "
+        "Raghav's data pipeline is 70% complete but blocked on a cleaned dataset from data engineering, which Priya will unblock today."
+    ),
+    "decisions": [
+        "Commit to launching the recommendation engine MVP as the sprint goal by May 31st.",
+        "Conduct new joiner AI team orientation on Thursday and team lunch on Friday."
+    ],
+    "open_questions": [
+        "Will the data engineering team deliver the cleaned dataset by Tuesday to unblock Raghav?",
+        "Who is conducting the Thursday API review required for Neha's timeline?"
+    ],
+    "meeting_quality": {
+        "score": 84,
+        "has_decisions": True,
+        "has_owners": True,
+        "has_deadlines": True,
+        "note": "Clear owners and deadlines established; critical external data dependency flagged early."
+    },
+    "tasks": [
+        {"description": "Write unit tests for model API integration ahead of QA", "owner": "Neha", "role": "SDE", "deadline": "Wednesday", "priority": "High"},
+        {"description": "Follow up with data engineering to unblock cleaned dataset", "owner": "Priya", "role": "Product Manager", "deadline": "Today", "priority": "High"},
+        {"description": "Complete recommendation engine data pipeline once dataset arrives", "owner": "Raghav", "role": "Data Scientist", "deadline": "Friday", "priority": "High"},
+        {"description": "Send environment setup guide to Amar for incoming interns", "owner": "Neha", "role": "SDE", "deadline": "Today", "priority": "Medium"},
+        {"description": "Review Raghav's recommendation pipeline code after unit tests", "owner": "Neha", "role": "SDE", "deadline": "Friday", "priority": "Medium"},
+        {"description": "Send calendar invite for Friday team lunch and run Thursday orientation", "owner": "Amar", "role": "HR", "deadline": "Today", "priority": "Low"},
+        {"description": "Set up development environments for two incoming interns", "owner": "Amar", "role": "HR", "deadline": "Monday", "priority": "Medium"}
+    ],
+    "risks": [
+        {
+            "type": "blocker",
+            "severity": "High",
+            "description": "Raghav's recommendation pipeline is blocked waiting on the cleaned dataset from Data Engineering."
+        },
+        {
+            "type": "overloaded_person",
+            "severity": "High",
+            "description": "Neha is assigned 3 concurrent tasks (API unit tests, pipeline code review, and intern setup docs) in a tight sprint."
+        },
+        {
+            "type": "role_mismatch",
+            "severity": "Medium",
+            "description": "Amar (HR) was asked to configure developer environments for incoming engineering interns."
+        }
+    ],
+    "member_activity": [
+        {"name": "Neha", "role": "SDE", "spoke": True, "tasks_assigned": 3},
+        {"name": "Raghav", "role": "Data Scientist", "spoke": True, "tasks_assigned": 1},
+        {"name": "Amar", "role": "HR", "spoke": True, "tasks_assigned": 2},
+        {"name": "Priya", "role": "Product Manager", "spoke": True, "tasks_assigned": 1},
+    ]
+}
+
+
+def _get_default_secret(key_name: str) -> str:
+    val = os.getenv(key_name, "").strip()
+    if val:
+        return val
+    try:
+        return st.secrets.get(key_name, "").strip()
+    except Exception:
+        return ""
+
+
+def _ensure_demo_environment():
+    """Ensure a default group, team members, sample meeting, and pre-filled transcript exist on cold start."""
+    groups = load_groups()
+    if not groups:
+        gid = create_group("AI Platform Engineering", "Core AI product & recommendation engine squad")
+        update_group_members(gid, DEMO_MEMBERS)
+        save_meeting_result(gid, "AI Platform Engineering", SAMPLE_TRANSCRIPT, DEMO_INITIAL_RESULT, "paste")
+        groups = load_groups()
+
+    if "active_group_id" not in st.session_state or not st.session_state.active_group_id:
+        if groups and not st.session_state.get("show_new_group"):
+            st.session_state.active_group_id = next(iter(groups.keys()))
+
+    if "pasted_transcript" not in st.session_state:
+        st.session_state["pasted_transcript"] = SAMPLE_TRANSCRIPT
+
+
+_ensure_demo_environment()
+
+
 def avatar_html(name: str, idx: int) -> str:
     initials = "".join(p[0].upper() for p in name.split()[:2]) if name else "?"
     cls = AV_COLORS[idx % len(AV_COLORS)]
     return f"<div class='mbadge-av {cls}'>{initials}</div>"
+
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -238,8 +338,18 @@ with st.sidebar:
     st.markdown("<div style='font-size:11px;font-weight:600;letter-spacing:.12em;color:#6C63FF;text-transform:uppercase;margin-bottom:4px'>Manager Console</div>", unsafe_allow_html=True)
     st.markdown("<div style='font-size:20px;font-weight:600;color:#DEDBD5;margin-bottom:20px'>Meeting Intelligence</div>", unsafe_allow_html=True)
 
-    api_key = st.text_input("Groq API Key", value=os.getenv("GROQ_API_KEY", ""), type="password", placeholder="gsk_...")
-    slack_webhook = st.text_input("Slack Webhook", value=os.getenv("SLACK_WEBHOOK_URL", ""), placeholder="https://hooks.slack.com/...")
+    default_groq_key = _get_default_secret("GROQ_API_KEY")
+    default_slack_url = _get_default_secret("SLACK_WEBHOOK_URL")
+
+    if default_groq_key:
+        st.markdown("<div class='ok-badge' style='margin-bottom:10px'>✓ Demo Groq API Key Active</div>", unsafe_allow_html=True)
+        with st.expander("Use custom API Key / Webhook"):
+            custom_key = st.text_input("Custom Groq API Key", value="", type="password", placeholder="gsk_...")
+            slack_webhook = st.text_input("Slack Webhook", value=default_slack_url, placeholder="https://hooks.slack.com/...")
+        api_key = custom_key.strip() if custom_key.strip() else default_groq_key
+    else:
+        api_key = st.text_input("Groq API Key", value="", type="password", placeholder="gsk_...")
+        slack_webhook = st.text_input("Slack Webhook", value=default_slack_url, placeholder="https://hooks.slack.com/...")
 
     st.markdown("---")
 
@@ -248,19 +358,15 @@ with st.sidebar:
 
     groups = load_groups()
 
-    if "active_group_id" not in st.session_state:
-        st.session_state.active_group_id = None
-
-    for gid, g in groups.items():
-        meetings = get_meetings_for_group(gid)
-        is_active = st.session_state.active_group_id == gid
-        card_cls = "g-card active" if is_active else "g-card"
+    for gid_item, g in groups.items():
+        meetings_list = get_meetings_for_group(gid_item)
+        is_active = st.session_state.active_group_id == gid_item
         member_count = len(g.get("members", []))
-        if st.button(f"{'▶ ' if is_active else ''}{g['name']}", key=f"grp_{gid}"):
-            st.session_state.active_group_id = gid
+        if st.button(f"{'▶ ' if is_active else ''}{g['name']}", key=f"grp_{gid_item}"):
+            st.session_state.active_group_id = gid_item
             st.session_state.pop("show_new_group", None)
             st.rerun()
-        st.markdown(f"<div style='font-size:11px;color:#444;margin:-10px 0 6px 4px;font-family:IBM Plex Mono'>{member_count} members · {len(meetings)} meetings</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:11px;color:#444;margin:-10px 0 6px 4px;font-family:IBM Plex Mono'>{member_count} members · {len(meetings_list)} meetings</div>", unsafe_allow_html=True)
 
     st.markdown("")
     if st.button("＋ New Group"):
@@ -287,14 +393,16 @@ if st.session_state.get("show_new_group"):
     col_a, col_b, _ = st.columns([1, 1, 3])
     with col_a:
         if st.button("Create Group", disabled=not new_name.strip()):
-            gid = create_group(new_name.strip(), new_desc.strip())
-            st.session_state.active_group_id = gid
+            new_gid = create_group(new_name.strip(), new_desc.strip())
+            st.session_state.active_group_id = new_gid
             st.session_state.pop("show_new_group", None)
             st.success(f"Group '{new_name}' created!")
             st.rerun()
     with col_b:
         if st.button("Cancel"):
             st.session_state.pop("show_new_group", None)
+            if groups:
+                st.session_state.active_group_id = next(iter(groups.keys()))
             st.rerun()
     st.stop()
 
@@ -318,7 +426,7 @@ if not st.session_state.active_group_id:
 groups = load_groups()
 group = groups.get(st.session_state.active_group_id)
 if not group:
-    st.session_state.active_group_id = None
+    st.session_state.active_group_id = next(iter(groups.keys())) if groups else None
     st.rerun()
 
 gid = group["id"]
@@ -342,7 +450,8 @@ with h1:
 with h2:
     if st.button("🗑 Delete Group"):
         delete_group(gid)
-        st.session_state.active_group_id = None
+        remaining = load_groups()
+        st.session_state.active_group_id = next(iter(remaining.keys())) if remaining else None
         st.rerun()
 
 
@@ -382,11 +491,12 @@ with tab_analyse:
     if "✏️" in input_method:
         col_ta, col_sample = st.columns([6, 1])
         with col_sample:
-            if st.button("Load\nsample"):
+            if st.button("Reset\nsample"):
                 st.session_state["pasted_transcript"] = SAMPLE_TRANSCRIPT
+                st.rerun()
         transcript = st.text_area(
             "Transcript",
-            value=st.session_state.get("pasted_transcript", ""),
+            value=st.session_state.get("pasted_transcript", SAMPLE_TRANSCRIPT),
             height=260,
             placeholder="Paste your meeting transcript here...\n\nTip: Include speaker names (e.g. 'Neha: I'll handle the tests') for accurate owner attribution.",
             label_visibility="collapsed"
@@ -514,7 +624,7 @@ with tab_analyse:
                 for r in risks:
                     label = RISK_ICONS.get(r.get("type", ""), "⚠️ Risk")
                     sev = r.get("severity", "")
-                    sev_color = "#F87171" if sev == "High" else "#FBBF24" if sev == "Medium" else "#AAA"
+                    sev_color = "#F87171" if sev in ("Critical", "High") else "#FBBF24" if sev == "Medium" else "#AAA"
                     st.markdown(f"""
                     <div class='risk-item'>
                       <strong style='font-size:11px'>{label}</strong>
@@ -532,7 +642,7 @@ with tab_analyse:
                 role_chip = f"<span class='t-chip' style='background:#1A1A28;color:#555'>{role}</span>" if role and role != "Unknown" else ""
                 html_str = f"""
                 <div class='t-row'>
-                  <div class='t-row-title'>{t['description']}</div>
+                  <div class='t-row-title'>{t.get('description','')}</div>
                   <div class='t-chips'>
                     <span class='t-chip' style='background:#1A1A28;color:#888'>👤 {t.get('owner','Unassigned')}</span>
                     {role_chip}
@@ -540,7 +650,6 @@ with tab_analyse:
                     <span class='t-chip' style='background:#1A1A28;color:{pc}'>● {p}</span>
                   </div>
                 </div>"""
-                # Remove empty lines to prevent markdown code block rendering
                 html_str = "\n".join(line for line in html_str.splitlines() if line.strip())
                 st.markdown(html_str, unsafe_allow_html=True)
 
@@ -553,7 +662,7 @@ with tab_analyse:
                 spoke = m.get("spoke", False)
                 n_tasks = m.get("tasks_assigned", 0)
                 av_cls = AV_COLORS[i % len(AV_COLORS)]
-                initials = "".join(p[0].upper() for p in m.get("name","?").split()[:2])
+                initials = "".join(p[0].upper() for p in m.get("name", "?").split()[:2])
                 col.markdown(f"""
                 <div style='background:#13131A;border:1px solid #1E1E28;border-radius:10px;padding:14px;text-align:center;margin-bottom:8px'>
                   <div class='mbadge-av {av_cls}' style='margin:0 auto 8px;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600'>{initials}</div>
@@ -580,11 +689,11 @@ with tab_analyse:
                     st.markdown("<div class='err-badge'>Set Slack Webhook in sidebar first</div>", unsafe_allow_html=True)
                 else:
                     try:
-                        tasks_text = "\n".join(f"• *{t['description']}* — {t.get('owner','?')} | {t.get('deadline','No deadline')}" for t in tasks[:8])
+                        tasks_text = "\n".join(f"• *{t.get('description','')}* — {t.get('owner','?')} | {t.get('deadline','No deadline')}" for t in tasks[:8])
                         payload = {
                             "blocks": [
                                 {"type": "header", "text": {"type": "plain_text", "text": f"📊 {result.get('meeting_title','Meeting')} — {group['name']}"}},
-                                {"type": "section", "text": {"type": "mrkdwn", "text": result.get('summary','')}},
+                                {"type": "section", "text": {"type": "mrkdwn", "text": result.get('summary', '')}},
                                 {"type": "divider"},
                                 {"type": "section", "text": {"type": "mrkdwn", "text": f"*Action Items ({len(tasks)})*\n{tasks_text}"}},
                                 {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Quality: *{score}/100* | Group: {group['name']} | Meeting Intelligence"}]}
@@ -612,7 +721,7 @@ with tab_members:
     st.markdown("""
     <div style='font-size:13px;color:#555;margin-bottom:16px'>
     Add each team member once. This information is saved and automatically included in every future meeting analysis for this group.
-    Claude will use names, roles, and notes to correctly attribute tasks and flag role mismatches.
+    The pipeline uses names, roles, and notes to correctly attribute tasks and flag role mismatches.
     </div>
     """, unsafe_allow_html=True)
 
@@ -691,16 +800,15 @@ with tab_history:
     if not meetings:
         st.markdown("<div style='color:#333;font-size:13px;padding:20px 0'>No meetings analysed yet for this group. Use the Analyse tab to process your first meeting.</div>", unsafe_allow_html=True)
     else:
-        # Selected meeting detail view
         selected_id = st.session_state.get(f"selected_meeting_{gid}")
 
         if selected_id:
             mtg = get_meeting_by_id(selected_id)
             if mtg:
                 r = mtg["result"]
-                dt = mtg.get("analyzed_at","")[:16].replace("T", " at ")
+                dt = mtg.get("analyzed_at", "")[:16].replace("T", " at ")
                 src_icons = {"paste": "✏️", "teams_vtt": "🎥 Teams", "teams_txt": "📄 Teams"}
-                src = src_icons.get(mtg.get("source","paste"), "✏️")
+                src = src_icons.get(mtg.get("source", "paste"), "✏️")
 
                 back_col, _ = st.columns([1, 5])
                 with back_col:
@@ -720,7 +828,7 @@ with tab_history:
                 for col, val, label, color in [
                     (hm1, len(htasks), "Tasks", "#DEDBD5"),
                     (hm2, len(hrisks), "Risks", "#F87171"),
-                    (hm3, len(r.get("decisions",[])), "Decisions", "#4ADE80"),
+                    (hm3, len(r.get("decisions", [])), "Decisions", "#4ADE80"),
                     (hm4, hs, "Quality", "#A78BFA"),
                 ]:
                     col.markdown(f"<div class='m-pill'><div class='m-pill-val' style='color:{color}'>{val}</div><div class='m-pill-lbl'>{label}</div></div>", unsafe_allow_html=True)
@@ -735,11 +843,11 @@ with tab_history:
 
                 st.markdown("<div class='s-head'>Action Items</div>", unsafe_allow_html=True)
                 for t in htasks:
-                    p = t.get("priority","Medium")
-                    pc = PRIORITY_COLORS.get(p,"#999")
+                    p = t.get("priority", "Medium")
+                    pc = PRIORITY_COLORS.get(p, "#999")
                     html_str = f"""
                     <div class='t-row'>
-                      <div class='t-row-title'>{t['description']}</div>
+                      <div class='t-row-title'>{t.get('description','')}</div>
                       <div class='t-chips'>
                         <span class='t-chip' style='background:#1A1A28;color:#888'>👤 {t.get('owner','Unassigned')}</span>
                         <span class='t-chip' style='background:#1A1A28;color:#777'>📅 {t.get('deadline','Not set')}</span>
@@ -763,16 +871,15 @@ with tab_history:
                         st.rerun()
 
         else:
-            # Meeting list
             for mtg in meetings:
                 r = mtg["result"]
-                dt = mtg.get("analyzed_at","")[:16].replace("T"," ")
-                src_icons = {"paste":"✏️","teams_vtt":"🎥","teams_txt":"📄"}
-                src = src_icons.get(mtg.get("source","paste"),"✏️")
-                score = r.get("meeting_quality",{}).get("score",0)
+                dt = mtg.get("analyzed_at", "")[:16].replace("T", " ")
+                src_icons = {"paste": "✏️", "teams_vtt": "🎥", "teams_txt": "📄"}
+                src = src_icons.get(mtg.get("source", "paste"), "✏️")
+                score = r.get("meeting_quality", {}).get("score", 0)
                 qc = "#4ADE80" if score >= 67 else "#FBBF24" if score >= 34 else "#F87171"
-                ntasks = len(r.get("tasks",[]))
-                nrisks = len(r.get("risks",[]))
+                ntasks = len(r.get("tasks", []))
+                nrisks = len(r.get("risks", []))
 
                 col_main, col_btn, col_del = st.columns([5, 1, 1])
                 with col_main:
