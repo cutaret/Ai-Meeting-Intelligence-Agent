@@ -1,97 +1,463 @@
 """
-agents.py (utils) — Wrapper around the main agents pipeline.
-Bridges app_v3's group/member-aware interface with the existing
-Groq-powered multi-agent pipeline in the root agents.py.
+utils/agents.py — Multi-Agent Pipeline for Meeting Intelligence (Manager Console)
+Injects saved Group Member context (names, roles, notes) into specialized Groq agents
+with automatic multi-model fallback for zero-downtime live demos.
 """
 
+import json
 import os
-import sys
+import re
+import time
+from datetime import datetime
+from typing import Optional
+import requests
 
-# Ensure root project dir is importable
-_root = os.path.dirname(os.path.dirname(__file__))
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+PRIMARY_MODEL = "llama-3.3-70b-versatile"
+FALLBACK_MODELS = [
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+]
+MAX_TOKENS = 2000
+RETRY_WAIT = 2  # seconds before failing over to next model
 
-import agents as pipeline  # the root-level agents.py
+
+def _resolve_api_key(explicit_key: Optional[str] = None) -> str:
+    """Resolve Groq API key from argument, environment variable, or Streamlit secrets."""
+    if explicit_key and explicit_key.strip():
+        return explicit_key.strip()
+
+    env_key = os.getenv("GROQ_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    try:
+        import streamlit as st
+        secret_key = st.secrets.get("GROQ_API_KEY", "").strip()
+        if secret_key:
+            return secret_key
+    except Exception:
+        pass
+
+    raise ValueError("GROQ_API_KEY is not set in environment variables or Streamlit secrets.")
 
 
-def _build_member_context(members: list) -> str:
-    """Build a team member context block to prepend to the transcript."""
+def _call_llm(
+    system: str,
+    user: str,
+    max_tokens: int = MAX_TOKENS,
+    api_key: Optional[str] = None,
+) -> str:
+    """Call Groq chat completions with automatic model fallback on 429/400/5xx errors."""
+    resolved_key = _resolve_api_key(api_key)
+
+    headers = {
+        "Authorization": f"Bearer {resolved_key}",
+        "Content-Type": "application/json",
+    }
+
+    models_to_try = [PRIMARY_MODEL] + FALLBACK_MODELS
+    last_error = None
+
+    for model_name in models_to_try:
+        for use_json_mode in (True, False):
+            payload = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            if use_json_mode:
+                payload["response_format"] = {"type": "json_object"}
+
+            try:
+                resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"].strip()
+
+                # Rate limit (429) or transient server error (5xx): brief pause then move to next model
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    time.sleep(RETRY_WAIT)
+                    break
+
+                # If a model rejects response_format (400), retry once without json_object mode
+                if resp.status_code == 400 and use_json_mode:
+                    continue
+
+                # Model decommissioned or not found (400/404): move to next fallback model
+                if resp.status_code in (400, 404):
+                    break
+
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = exc
+                time.sleep(1)
+                break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("All Groq production models failed or hit rate limits. Please retry shortly.")
+
+
+def _parse_json(raw: str) -> dict:
+    """Strip markdown fences or surrounding text and parse JSON safely."""
+    if not raw:
+        return {}
+    cleaned = re.sub(r"^```(?:json)?", "", raw.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE).strip()
+
+    try:
+        return json.loads(cleaned, strict=False)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            try:
+                return json.loads(match.group(0), strict=False)
+            except json.JSONDecodeError:
+                pass
+        return {}
+
+
+def _format_team_context(members: Optional[list] = None) -> str:
+    """Format saved group members into a structured context block for agent prompts."""
     if not members:
         return ""
-    lines = ["[TEAM CONTEXT — use this to correctly attribute tasks and flag role mismatches]"]
+    lines = []
     for m in members:
-        name = m.get("name", "")
-        role = m.get("role", "")
-        notes = m.get("notes", "")
-        parts = [name]
-        if role:
-            parts.append(f"Role: {role}")
-        if notes:
-            parts.append(f"Notes: {notes}")
-        lines.append("  - " + " | ".join(parts))
-    lines.append("[END TEAM CONTEXT]\n")
-    return "\n".join(lines)
+        name = m.get("name", "").strip()
+        if not name:
+            continue
+        role = m.get("role", "Team Member").strip() or "Team Member"
+        notes = m.get("notes", "").strip()
+        note_str = f" ({notes})" if notes else ""
+        lines.append(f"- {name}: {role}{note_str}")
+    if not lines:
+        return ""
+    return "KNOWN TEAM MEMBERS & ROLES:\n" + "\n".join(lines) + "\n\n"
 
 
-def _extract_member_activity(result: dict, members: list) -> list:
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 1 — SUMMARIZER
+# ──────────────────────────────────────────────────────────────────────────────
+SUMMARIZER_SYSTEM = """You are a meeting summarizer agent. Your ONLY job is to extract:
+- A 3-5 sentence executive summary
+- A list of firm decisions made
+- A list of unresolved open questions
+Respond ONLY in valid JSON. No markdown, no explanation."""
+
+
+def _build_summarizer_prompt(transcript: str, team_context: str = "") -> str:
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    return f"""{team_context}Analyze this transcript and return:
+{{
+  "meeting_title": "short inferred title (5-8 words)",
+  "date": "extract from transcript or use today: {today_str}",
+  "attendees": ["name1", "name2"],
+  "summary": "3-5 sentence executive summary",
+  "key_points": ["bullet 1", "bullet 2", "bullet 3"],
+  "decisions": ["firm decision 1", "firm decision 2"],
+  "open_questions": ["unresolved question 1"],
+  "meeting_quality": {{
+    "score": 0,
+    "has_decisions": true,
+    "has_owners": true,
+    "has_deadlines": true,
+    "note": "one sentence feedback on meeting quality"
+  }}
+}}
+Rules:
+- Only include things explicitly stated in the transcript
+- Decisions are things definitively agreed/announced (not discussed, not maybe)
+- score: +34 if decisions exist, +33 if all mentioned tasks have owners, +33 if all tasks have deadlines
+TRANSCRIPT:
+{transcript}"""
+
+
+def run_summarizer(transcript: str, members: Optional[list] = None, api_key: Optional[str] = None) -> dict:
+    team_ctx = _format_team_context(members)
+    raw = _call_llm(SUMMARIZER_SYSTEM, _build_summarizer_prompt(transcript, team_ctx), api_key=api_key)
+    return _parse_json(raw)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 2 — TASK EXTRACTOR
+# ──────────────────────────────────────────────────────────────────────────────
+TASK_SYSTEM = """You are a task extraction agent. Your ONLY job is to find every action item,
+commitment, or to-do in a meeting transcript — explicit AND implied.
+Respond ONLY in valid JSON. No markdown, no explanation."""
+
+TASK_PROMPT = """Extract all tasks from this transcript and return:
+{
+  "tasks": [
+    {
+      "id": "task_1",
+      "description": "clear, actionable description of what must be done",
+      "owner": "person's name matching KNOWN TEAM MEMBERS if applicable, else 'Unassigned'",
+      "role": "person's role from KNOWN TEAM MEMBERS if known, else 'Unknown'",
+      "deadline": "specific deadline if mentioned, else 'Not set'",
+      "priority": "High / Medium / Low",
+      "complexity": "High / Medium / Low",
+      "category": "Engineering / Design / Management / DevOps / HR / Other",
+      "depends_on": "task_id of blocking task, or null",
+      "notes": "any extra context from transcript"
+    }
+  ]
+}
+Priority rules:
+- High = blocks others, has urgent deadline, or explicitly flagged
+- Medium = normal sprint work
+- Low = nice-to-have, future sprint
+Complexity rules:
+- High = multi-step, multi-day, involves multiple people
+- Low = quick action (send email, update doc, make intro)
+TRANSCRIPT:
+"""
+
+
+def run_task_extractor(transcript: str, members: Optional[list] = None, api_key: Optional[str] = None) -> dict:
+    team_ctx = _format_team_context(members)
+    raw = _call_llm(TASK_SYSTEM, team_ctx + TASK_PROMPT + transcript, max_tokens=2500, api_key=api_key)
+    return _parse_json(raw)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 3 — RISK PREDICTOR
+# ──────────────────────────────────────────────────────────────────────────────
+RISK_SYSTEM = """You are a project risk prediction agent. Given tasks from a meeting and the team roster,
+you identify risks: missing owners, missing deadlines, overloaded people, blockers,
+dependency conflicts, scope creep, and role mismatches.
+Respond ONLY in valid JSON. No markdown, no explanation."""
+
+RISK_PROMPT = """Given these tasks, the known team members, and the transcript, identify all risks:
+{
+  "risks": [
+    {
+      "type": "missing_owner | missing_deadline | overloaded_person | blocker | dependency_conflict | scope_creep | role_mismatch",
+      "severity": "Critical / High / Medium / Low",
+      "description": "specific explanation of the risk",
+      "related_task_id": "task_id or null",
+      "affected_person": "name or null",
+      "recommendation": "one-line suggested action to mitigate"
+    }
+  ],
+  "overloaded_people": [
+    {
+      "name": "person name",
+      "task_count": 0,
+      "tasks": ["task description 1", "task description 2"]
+    }
+  ]
+}
+Rules:
+- Every task with no owner → missing_owner risk (severity: High)
+- Every task with no deadline → missing_deadline risk (severity: Medium)
+- Person with 3+ tasks → overloaded_person risk (severity: High)
+- Task assigned to someone whose role in KNOWN TEAM MEMBERS does not fit the task (e.g. HR setting up dev environments) → role_mismatch risk (severity: Medium)
+- Explicit blockers mentioned in transcript → blocker risk (severity: High)
+- Task that another task depends on but has no clear completion → dependency_conflict
+- Any task where scope seems unclear or expanding → scope_creep
+TASKS:
+"""
+
+
+def run_risk_predictor(
+    tasks: list,
+    transcript: str,
+    members: Optional[list] = None,
+    api_key: Optional[str] = None,
+) -> dict:
+    team_ctx = _format_team_context(members)
+    task_json = json.dumps(tasks, indent=2)
+    prompt = team_ctx + RISK_PROMPT + task_json + "\n\nORIGINAL TRANSCRIPT FOR CONTEXT:\n" + transcript
+    raw = _call_llm(RISK_SYSTEM, prompt, api_key=api_key)
+    return _parse_json(raw)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 4 — SENTIMENT ANALYZER
+# ──────────────────────────────────────────────────────────────────────────────
+SENTIMENT_SYSTEM = """You are a meeting dynamics and sentiment analysis agent.
+You analyze how people communicate in meetings: their tone, participation, confidence,
+and potential concerns. Be analytical but fair.
+Respond ONLY in valid JSON. No markdown, no explanation."""
+
+SENTIMENT_PROMPT = """Analyze the meeting dynamics and sentiment from this transcript:
+{
+  "overall_tone": "Productive / Tense / Uncertain / Collaborative / Rushed",
+  "meeting_health": "Good / At Risk / Poor",
+  "health_reason": "one sentence explanation",
+  "speaker_analysis": [
+    {
+      "name": "speaker name",
+      "sentiment": "Confident / Uncertain / Stressed / Neutral / Positive",
+      "engagement_level": "High / Medium / Low",
+      "speaking_lines": 0,
+      "key_contributions": ["contribution 1"],
+      "potential_concerns": ["any concern or empty list"],
+      "tone_notes": "brief observation about how they communicate"
+    }
+  ],
+  "positive_signals": ["good thing noticed 1", "good thing noticed 2"],
+  "warning_signals": ["concern 1", "concern 2"],
+  "follow_up_suggestions": ["suggestion for next meeting 1"]
+}
+Be specific and evidence-based — cite what was actually said.
+TRANSCRIPT:
+"""
+
+
+def run_sentiment_analyzer(transcript: str, api_key: Optional[str] = None) -> dict:
+    raw = _call_llm(SENTIMENT_SYSTEM, SENTIMENT_PROMPT + transcript, api_key=api_key)
+    return _parse_json(raw)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 5 — FOLLOW-UP AGENT
+# ──────────────────────────────────────────────────────────────────────────────
+FOLLOWUP_SYSTEM = """You are a professional follow-up message writer for workplace settings.
+You write concise, friendly, actionable Slack/email messages.
+Respond ONLY in valid JSON. No markdown, no explanation."""
+
+FOLLOWUP_PROMPT = """Given these tasks, generate follow-up messages for each unique owner:
+{
+  "follow_ups": [
+    {
+      "recipient": "person's name",
+      "channel": "slack",
+      "subject": "brief subject line",
+      "message": "the actual message — friendly, professional, 2-4 sentences max",
+      "tasks_referenced": ["task description 1"],
+      "urgency": "Immediate / This Week / This Sprint"
+    }
+  ]
+}
+Rules:
+- One message per person (consolidate all their tasks)
+- Slack messages: short, use bullet points for tasks
+- Reference specific task descriptions and deadlines
+- Tone: collegial and direct, not pushy
+- Include a clear call-to-action
+TASKS (JSON):
+"""
+
+
+def run_followup_agent(tasks: list, api_key: Optional[str] = None) -> dict:
+    task_json = json.dumps(tasks, indent=2)
+    raw = _call_llm(FOLLOWUP_SYSTEM, FOLLOWUP_PROMPT + task_json, api_key=api_key)
+    return _parse_json(raw)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ORCHESTRATORS — run_pipeline & analyse_meeting
+# ──────────────────────────────────────────────────────────────────────────────
+def run_pipeline(
+    transcript: str,
+    run_sentiment: bool = True,
+    run_followup: bool = True,
+    members: Optional[list] = None,
+    api_key: Optional[str] = None,
+) -> dict:
+    """Full 5-agent sequential pipeline."""
+    results = {"pipeline_version": "3.0", "agents_run": []}
+
+    # Agent 1: Summarizer
+    summary_data = run_summarizer(transcript, members=members, api_key=api_key)
+    results.update(summary_data)
+    results["agents_run"].append("summarizer")
+
+    # Agent 2: Task Extractor
+    task_data = run_task_extractor(transcript, members=members, api_key=api_key)
+    results["tasks"] = task_data.get("tasks", [])
+    results["agents_run"].append("task_extractor")
+
+    # Agent 3: Risk Predictor
+    risk_data = run_risk_predictor(results["tasks"], transcript, members=members, api_key=api_key)
+    results["risks"] = risk_data.get("risks", [])
+    results["overloaded_people"] = risk_data.get("overloaded_people", [])
+    results["agents_run"].append("risk_predictor")
+
+    # Agent 4: Sentiment Analyzer
+    if run_sentiment:
+        sentiment_data = run_sentiment_analyzer(transcript, api_key=api_key)
+        results["sentiment"] = sentiment_data
+        results["agents_run"].append("sentiment_analyzer")
+
+    # Agent 5: Follow-up Agent
+    if run_followup and results["tasks"]:
+        followup_data = run_followup_agent(results["tasks"], api_key=api_key)
+        results["follow_ups"] = followup_data.get("follow_ups", [])
+        results["agents_run"].append("followup_agent")
+
+    return results
+
+
+def analyse_meeting(
+    transcript: str,
+    members: Optional[list] = None,
+    api_key: Optional[str] = None,
+) -> dict:
     """
-    Build member_activity list by cross-referencing team members
-    with the analysis results (tasks, attendees).
+    Manager Console entrypoint called by app_v3.py.
+    Runs the multi-agent pipeline and computes role chips and per-member activity cards.
     """
-    if not members:
-        return []
+    members = members or []
+    role_map = {}
+    for m in members:
+        full_name = m.get("name", "").strip()
+        if full_name:
+            role_val = m.get("role", "Team Member").strip() or "Team Member"
+            role_map[full_name.lower()] = role_val
+            role_map[full_name.split()[0].lower()] = role_val
 
-    attendees = [a.lower() for a in result.get("attendees", [])]
+    result = run_pipeline(
+        transcript,
+        run_sentiment=True,
+        run_followup=True,
+        members=members,
+        api_key=api_key,
+    )
     tasks = result.get("tasks", [])
 
-    activity = []
-    for m in members:
-        name = m.get("name", "")
-        name_lower = name.lower()
-
-        # Check if they spoke (appeared in attendees list)
-        spoke = any(name_lower in a or a in name_lower for a in attendees)
-
-        # Count tasks assigned to them
-        task_count = sum(
-            1 for t in tasks
-            if name_lower in t.get("owner", "").lower()
+    # Normalize task roles and count tasks per member
+    task_counts = {}
+    for t in tasks:
+        owner = t.get("owner", "Unassigned").strip()
+        owner_key = owner.lower()
+        first_key = owner.split()[0].lower() if owner else ""
+        resolved_role = (
+            role_map.get(owner_key)
+            or role_map.get(first_key)
+            or t.get("role")
+            or t.get("category", "Unknown")
         )
+        t["role"] = resolved_role
+        task_counts[owner_key] = task_counts.get(owner_key, 0) + 1
+        if first_key and first_key != owner_key:
+            task_counts[first_key] = task_counts.get(first_key, 0) + 1
 
-        activity.append({
+    # Compute Member Activity cards for Manager Console
+    transcript_lower = transcript.lower()
+    member_activity = []
+    for m in members:
+        name = m.get("name", "").strip()
+        if not name:
+            continue
+        first_name = name.split()[0].lower()
+        spoke = bool(re.search(rf"\b{re.escape(first_name)}\b\s*:", transcript_lower)) or (
+            first_name in transcript_lower
+        )
+        assigned = task_counts.get(name.lower(), task_counts.get(first_name, 0))
+        member_activity.append({
             "name": name,
             "role": m.get("role", ""),
             "spoke": spoke,
-            "tasks_assigned": task_count,
+            "tasks_assigned": assigned,
         })
 
-    return activity
-
-
-def analyse_meeting(transcript: str, members: list, api_key: str) -> dict:
-    """
-    Run the full multi-agent pipeline on a transcript.
-
-    Args:
-        transcript: The meeting transcript text.
-        members: List of team member dicts [{name, role, notes}, ...].
-        api_key: Groq API key (set into env for the pipeline).
-
-    Returns:
-        Assembled result dict with tasks, risks, summary, quality, member_activity, etc.
-    """
-    # Set the API key for the pipeline
-    os.environ["GROQ_API_KEY"] = api_key
-
-    # Prepend team context so the LLM knows who's who
-    member_context = _build_member_context(members)
-    enriched_transcript = member_context + transcript
-
-    # Run the existing multi-agent pipeline
-    result = pipeline.run_pipeline(enriched_transcript)
-
-    # Add member activity analysis
-    result["member_activity"] = _extract_member_activity(result, members)
-
+    result["member_activity"] = member_activity
     return result
