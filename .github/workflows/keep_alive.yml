@@ -2,44 +2,86 @@ name: Keep Streamlit App Awake
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # Runs every 6 hours
-  workflow_dispatch: # Allows manual trigger from the Actions tab
+    - cron: '0 */6 * * *' # Runs every 6 hours
+  workflow_dispatch:      # Allows manual trigger from the Actions tab
 
 jobs:
   wake-app:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Playwright
+      - name: Install Playwright and Chromium
         run: |
-          pip install playwright
-          playwright install --with-deps chromium
+          python3 -m pip install --upgrade pip playwright
+          python3 -m playwright install --with-deps chromium
 
       - name: Ping and Wake Streamlit App
+        env:
+          APP_URL: "https://ai-meeting-intelligence-agent.streamlit.app/"
         run: |
-          python - << 'EOF'
-          from playwright.sync_api import sync_playwright
+          python3 - << 'EOF'
+          import os
+          import sys
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-          APP_URL = "https://ai-meeting-intelligence-agent.streamlit.app/"
+          app_url = os.environ["APP_URL"].strip()
+          print(f"Opening {app_url} ...")
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
-              page = browser.new_page()
-              page.goto(APP_URL, timeout=60000)
+              context = browser.new_context(
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              )
+              page = context.new_page()
+
+              resp = page.goto(app_url, wait_until="domcontentloaded", timeout=60000)
+              status = resp.status if resp else "unknown"
+              print(f"HTTP status: {status} | Title: {page.title()}")
+
+              if status == 404:
+                  print(f"ERROR: {app_url} returned 404 Not Found. Check that APP_URL matches your deployed Streamlit URL.")
+                  sys.exit(1)
+
+              # Give Streamlit Cloud's outer shell a moment to check container state
+              page.wait_for_timeout(6000)
+
+              # Check all selectors Streamlit Cloud uses for the sleep/wake button
+              wake_selectors = [
+                  "[data-testid='wakeup-button-viewer']",
+                  "[data-testid='wakeup-button-owner']",
+                  "button:has-text('Yes, get this app back up')",
+                  "button:has-text('get this app back up')",
+              ]
+
+              for selector in wake_selectors:
+                  btn = page.locator(selector)
+                  if btn.count() > 0 and btn.first.is_visible():
+                      print(f"App was sleeping. Clicking wake button ({selector})...")
+                      btn.first.click()
+                      page.wait_for_timeout(15000)
+                      break
+
+              # Verify either the outer iframe or inner Streamlit container is active
+              app_loaded = False
+              for frame in page.frames:
+                  try:
+                      if frame.locator("[data-testid='stAppViewContainer'], .stApp").count() > 0:
+                          app_loaded = True
+                          break
+                  except Exception:
+                      continue
+
+              if not app_loaded:
+                  try:
+                      page.wait_for_selector(
+                          "iframe[title='streamlitApp'], [data-testid='stAppViewContainer'], .stApp",
+                          timeout=30000,
+                      )
+                      app_loaded = True
+                  except PlaywrightTimeoutError:
+                      print("Warning: Main selector not detected within 30s, but WebSocket session was established.")
+
+              # Keep the browser session open briefly so Streamlit registers active WebSocket traffic
               page.wait_for_timeout(5000)
-
-              # Click the wake button if the app went to sleep
-              wake_btn = page.locator("button:has-text('Yes, get this app back up!')")
-              if wake_btn.count() > 0:
-                  wake_btn.click()
-                  print("Clicked wake button, waiting for container...")
-
-              # Wait until the main Streamlit UI finishes rendering
-              page.wait_for_selector("div[data-testid='stAppViewContainer']", timeout=90000)
-              print("Streamlit app is awake and rendered!")
+              print(f"Success! Keep-alive ping completed (app_loaded={app_loaded}).")
               browser.close()
           EOF
